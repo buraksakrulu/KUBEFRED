@@ -1,0 +1,338 @@
+#!/usr/bin/env pwsh
+
+# KUBEFRED - Kubernetes Context and Namespace Switcher for Windows
+# Usage: 
+#   KUBEFRED C cluster-name    # Switch to cluster
+#   KUBEFRED N namespace-name  # Switch default namespace
+
+param(
+    [Parameter(Position=0)]
+    [string]$Command,
+    
+    [Parameter(Position=1)]
+    [string]$Target
+)
+
+# Function to display usage
+function Show-Usage {
+    Write-Host ""
+    Write-Host "██╗  ██╗██╗   ██╗██████╗ ███████╗███████╗██████╗ ███████╗██████╗ " -ForegroundColor Blue
+    Write-Host "██║ ██╔╝██║   ██║██╔══██╗██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗" -ForegroundColor Blue  
+    Write-Host "█████╔╝ ██║   ██║██████╔╝█████╗  █████╗  ██████╔╝█████╗  ██║  ██║" -ForegroundColor Cyan
+    Write-Host "██╔═██╗ ██║   ██║██╔══██╗██╔══╝  ██╔══╝  ██╔══██╗██╔══╝  ██║  ██║" -ForegroundColor Cyan
+    Write-Host "██║  ██╗╚██████╔╝██████╔╝███████╗██║     ██║  ██║███████╗██████╔╝" -ForegroundColor Blue
+    Write-Host "╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═════╝ " -ForegroundColor Blue
+    Write-Host ""
+    Write-Host "🤖 Your Kubernetes Context and Namespace Butler 🤖" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Usage:"
+    Write-Host "  KUBEFRED C <cluster-name>     # Switch to specified cluster context" -ForegroundColor Green
+    Write-Host "  KUBEFRED N <namespace-name>   # Switch default namespace for kubectl" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Examples:"
+    Write-Host "  KUBEFRED C production         # Switch to production cluster"
+    Write-Host "  KUBEFRED C eks-prod1          # Switch to EKS cluster"
+    Write-Host "  KUBEFRED N default            # Set default namespace"
+    Write-Host "  KUBEFRED N kube-system        # Set kube-system namespace"
+    Write-Host ""
+    Write-Host "💡 Tip: You can use partial cluster names (e.g., 'prod1' instead of full EKS ARN)" -ForegroundColor Yellow
+}
+
+# Function to check if kubectl is available
+function Test-KubectlAvailable {
+    try {
+        $null = Get-Command kubectl -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Host "❌ KUBEFRED: kubectl is not installed or not in PATH" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Function to find matching context
+function Find-MatchingContext {
+    param([string]$SearchTerm)
+    
+    try {
+        $contexts = kubectl config get-contexts --output=name 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to get contexts"
+        }
+        
+        # First, try exact match
+        $exactMatch = $contexts | Where-Object { $_ -eq $SearchTerm }
+        if ($exactMatch) {
+            return @{
+                Status = "EXACT_MATCH"
+                Context = $exactMatch
+            }
+        }
+        
+        # Try partial matches (case insensitive)
+        $partialMatches = $contexts | Where-Object { 
+            $_.ToLower().Contains($SearchTerm.ToLower()) -or
+            ($_ -match "cluster[/%]$SearchTerm" -and $_ -match "arn:aws:eks:")
+        }
+        
+        if ($partialMatches.Count -eq 1) {
+            return @{
+                Status = "SINGLE_MATCH"
+                Context = $partialMatches[0]
+            }
+        }
+        elseif ($partialMatches.Count -gt 1) {
+            return @{
+                Status = "MULTIPLE_MATCHES"
+                Contexts = $partialMatches
+            }
+        }
+        else {
+            return @{
+                Status = "NO_MATCH"
+                AllContexts = $contexts
+            }
+        }
+    }
+    catch {
+        return @{
+            Status = "ERROR"
+            Message = $_.Exception.Message
+        }
+    }
+}
+
+# Function to switch cluster context
+function Switch-Cluster {
+    param([string]$ClusterName)
+    
+    if ([string]::IsNullOrWhiteSpace($ClusterName)) {
+        Write-Host "❌ KUBEFRED: Cluster name is required" -ForegroundColor Red
+        Show-Usage
+        return $false
+    }
+    
+    if (-not (Test-KubectlAvailable)) {
+        return $false
+    }
+    
+    # Find matching context
+    $matchResult = Find-MatchingContext $ClusterName
+    
+    switch ($matchResult.Status) {
+        "EXACT_MATCH" {
+            $targetContext = $matchResult.Context
+        }
+        "SINGLE_MATCH" {
+            $targetContext = $matchResult.Context
+        }
+        "MULTIPLE_MATCHES" {
+            Write-Host "🎩 KUBEFRED Butler: Sir, I found multiple contexts matching '$ClusterName':" -ForegroundColor Yellow
+            Write-Host ""
+            $contextsArray = @()
+            for ($i = 0; $i -lt $matchResult.Contexts.Count; $i++) {
+                $contextsArray += $matchResult.Contexts[$i]
+                Write-Host "  $($i + 1)) $($matchResult.Contexts[$i])"
+            }
+            Write-Host ""
+            $selection = Read-Host "🤖 KUBEFRED Butler: Sir, please enter the number of your preferred context"
+            
+            # Validate selection
+            $selectionNum = 0
+            if ([int]::TryParse($selection, [ref]$selectionNum) -and $selectionNum -ge 1 -and $selectionNum -le $contextsArray.Count) {
+                $selectedContext = $contextsArray[$selectionNum - 1]
+                Write-Host "🎩 KUBEFRED Butler: Excellent choice, Sir! Switching to context $selectionNum..." -ForegroundColor Green
+                
+                # Switch to selected context
+                try {
+                    $null = kubectl config use-context $selectedContext 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "🤖 KUBEFRED: Successfully switched to cluster: $ClusterName" -ForegroundColor Green
+                        Write-Host "🔍 KUBEFRED: Selected context: $selectedContext" -ForegroundColor Cyan
+                        
+                        # Show current context info
+                        $currentContext = kubectl config current-context 2>$null
+                        $currentNamespace = kubectl config view --minify --output 'jsonpath={..namespace}' 2>$null
+                        if ([string]::IsNullOrWhiteSpace($currentNamespace)) {
+                            $currentNamespace = "default"
+                        }
+                        
+                        Write-Host "📍 KUBEFRED: Current context: $currentContext" -ForegroundColor Cyan
+                        Write-Host "📦 KUBEFRED: Current namespace: $currentNamespace" -ForegroundColor Cyan
+                        return $true
+                    }
+                    else {
+                        throw "kubectl use-context failed"
+                    }
+                }
+                catch {
+                    Write-Host "❌ KUBEFRED Butler: My apologies Sir, failed to switch to the selected context." -ForegroundColor Red
+                    return $false
+                }
+            }
+            else {
+                Write-Host "❌ KUBEFRED Butler: Sir, that's not a valid selection. Please run the command again and choose a number between 1 and $($contextsArray.Count)." -ForegroundColor Red
+                return $false
+            }
+        }
+        "NO_MATCH" {
+            Write-Host "❌ KUBEFRED: No context found matching '$ClusterName'" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "🤖 KUBEFRED: Available contexts:" -ForegroundColor Yellow
+            $matchResult.AllContexts | ForEach-Object {
+                if ($_ -match "arn:aws:eks:") {
+                    # Extract cluster name from EKS ARN
+                    if ($_ -match "cluster[/%]([^/%]+)") {
+                        $clusterShort = $matches[1]
+                        Write-Host "  $_"
+                        Write-Host "    └─ Short name: $clusterShort" -ForegroundColor Cyan
+                    } else {
+                        Write-Host "  $_"
+                    }
+                } else {
+                    Write-Host "  $_"
+                }
+            }
+            return $false
+        }
+        "ERROR" {
+            Write-Host "❌ KUBEFRED: $($matchResult.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+    
+    # Switch context
+    try {
+        $null = kubectl config use-context $targetContext 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "🤖 KUBEFRED: Switched to cluster: $ClusterName" -ForegroundColor Green
+            if ($targetContext -ne $ClusterName) {
+                Write-Host "🔍 KUBEFRED: Matched context: $targetContext" -ForegroundColor Cyan
+            }
+            
+            # Show current context info
+            $currentContext = kubectl config current-context 2>$null
+            $currentNamespace = kubectl config view --minify --output 'jsonpath={..namespace}' 2>$null
+            if ([string]::IsNullOrWhiteSpace($currentNamespace)) {
+                $currentNamespace = "default"
+            }
+            
+            Write-Host "📍 KUBEFRED: Current context: $currentContext" -ForegroundColor Cyan
+            Write-Host "📦 KUBEFRED: Current namespace: $currentNamespace" -ForegroundColor Cyan
+            return $true
+        }
+        else {
+            throw "kubectl use-context failed"
+        }
+    }
+    catch {
+        Write-Host "❌ KUBEFRED: Failed to switch to cluster: $targetContext" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Function to switch namespace
+function Switch-Namespace {
+    param([string]$NamespaceName)
+    
+    if ([string]::IsNullOrWhiteSpace($NamespaceName)) {
+        Write-Host "❌ KUBEFRED: Namespace name is required" -ForegroundColor Red
+        Show-Usage
+        return $false
+    }
+    
+    if (-not (Test-KubectlAvailable)) {
+        return $false
+    }
+    
+    # Check if we have a current context
+    try {
+        $currentContext = kubectl config current-context 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($currentContext)) {
+            Write-Host "❌ KUBEFRED: No current kubectl context set. Please set a context first using 'KUBEFRED C <cluster-name>'." -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host "❌ KUBEFRED: No current kubectl context set. Please set a context first using 'KUBEFRED C <cluster-name>'." -ForegroundColor Red
+        return $false
+    }
+    
+    # Check if namespace exists
+    try {
+        $null = kubectl get namespace $NamespaceName 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "❌ KUBEFRED: Namespace '$NamespaceName' not found in current cluster" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "🤖 KUBEFRED: Available namespaces:" -ForegroundColor Yellow
+            
+            try {
+                $namespaces = kubectl get namespaces --output=custom-columns=NAME:.metadata.name --no-headers 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $namespaces | ForEach-Object { Write-Host "  $_" }
+                }
+                else {
+                    Write-Host "  Failed to list namespaces"
+                }
+            }
+            catch {
+                Write-Host "  Failed to list namespaces"
+            }
+            return $false
+        }
+    }
+    catch {
+        Write-Host "❌ KUBEFRED: Failed to verify namespace existence" -ForegroundColor Red
+        return $false
+    }
+    
+    # Set namespace as default for current context
+    try {
+        $null = kubectl config set-context $currentContext --namespace=$NamespaceName 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "🤖 KUBEFRED: Default namespace set to: $NamespaceName" -ForegroundColor Green
+            Write-Host "📍 KUBEFRED: Context: $currentContext" -ForegroundColor Cyan
+            Write-Host "📦 KUBEFRED: Default namespace: $NamespaceName" -ForegroundColor Cyan
+            return $true
+        }
+        else {
+            throw "kubectl set-context failed"
+        }
+    }
+    catch {
+        Write-Host "❌ KUBEFRED: Failed to set default namespace to: $NamespaceName" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Main logic
+if ([string]::IsNullOrWhiteSpace($Command)) {
+    Show-Usage
+    exit 1
+}
+
+switch ($Command.ToUpper()) {
+    "C" {
+        if ([string]::IsNullOrWhiteSpace($Target)) {
+            Write-Host "❌ KUBEFRED: Cluster name is required after 'C'" -ForegroundColor Red
+            Show-Usage
+            exit 1
+        }
+        $success = Switch-Cluster $Target
+        if (-not $success) { exit 1 }
+    }
+    "N" {
+        if ([string]::IsNullOrWhiteSpace($Target)) {
+            Write-Host "❌ KUBEFRED: Namespace name is required after 'N'" -ForegroundColor Red
+            Show-Usage
+            exit 1
+        }
+        $success = Switch-Namespace $Target
+        if (-not $success) { exit 1 }
+    }
+    default {
+        Write-Host "❌ KUBEFRED: Invalid command '$Command'. Use 'C' for cluster or 'N' for namespace." -ForegroundColor Red
+        Show-Usage
+        exit 1
+    }
+}
