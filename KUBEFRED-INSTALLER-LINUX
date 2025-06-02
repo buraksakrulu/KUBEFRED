@@ -1,0 +1,571 @@
+#!/bin/bash
+# KUBEFRED Installer Script
+# Install KUBEFRED - Your Kubernetes Context and Namespace Butler
+# Usage: curl -sSL https://raw.githubusercontent.com/your-repo/kubefred/main/install.sh | sudo bash
+
+set -e  # Exit on any error
+
+# Configuration
+KUBEFRED_VERSION="latest"
+KUBEFRED_URL="https://raw.githubusercontent.com/your-repo/kubefred/main/KUBEFRED"
+INSTALL_DIR="/usr/local/bin"
+SCRIPT_NAME="KUBEFRED"
+TEMP_DIR="/tmp/kubefred-install"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Emojis
+ROBOT="🤖"
+CHECK="✅"
+CROSS="❌"
+GEAR="⚙️"
+DOWNLOAD="📥"
+INSTALL="🔧"
+CROWN="👑"
+
+# Banner
+show_banner() {
+    echo -e "${PURPLE}"
+    echo "██╗  ██╗██╗   ██╗██████╗ ███████╗███████╗██████╗ ███████╗██████╗ "
+    echo "██║ ██╔╝██║   ██║██╔══██╗██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗"
+    echo "█████╔╝ ██║   ██║██████╔╝█████╗  █████╗  ██████╔╝█████╗  ██║  ██║"
+    echo "██╔═██╗ ██║   ██║██╔══██╗██╔══╝  ██╔══╝  ██╔══██╗██╔══╝  ██║  ██║"
+    echo "██║  ██╗╚██████╔╝██████╔╝███████╗██║     ██║  ██║███████╗██████╔╝"
+    echo "╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═════╝ "
+    echo -e "${NC}"
+    echo -e "${CYAN}${CROWN} Your Kubernetes Context and Namespace Butler ${CROWN}${NC}"
+    echo -e "${BLUE}Installer Script v1.0${NC}"
+    echo ""
+}
+
+# Logging functions
+log_info() {
+    echo -e "${BLUE}${GEAR} $1${NC}"
+}
+
+log_success() {
+    echo -e "${GREEN}${CHECK} $1${NC}"
+}
+
+log_error() {
+    echo -e "${RED}${CROSS} $1${NC}"
+}
+
+log_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+log_download() {
+    echo -e "${PURPLE}${DOWNLOAD} $1${NC}"
+}
+
+log_install() {
+    echo -e "${CYAN}${INSTALL} $1${NC}"
+}
+
+# Check if running as root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This installer must be run as root (use sudo)"
+        echo "Usage: curl -sSL https://install.kubefred.io | sudo bash"
+        echo "   or: sudo bash install.sh"
+        exit 1
+    fi
+    log_success "Running with root privileges"
+}
+
+# Detect OS and architecture
+detect_system() {
+    log_info "Detecting system information..."
+    
+    # Detect OS
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        OS="linux"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        OS="darwin"
+    else
+        log_error "Unsupported operating system: $OSTYPE"
+        log_info "KUBEFRED supports Linux and macOS"
+        exit 1
+    fi
+    
+    # Detect architecture
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64)
+            ARCH="amd64"
+            ;;
+        aarch64|arm64)
+            ARCH="arm64"
+            ;;
+        armv7l)
+            ARCH="arm"
+            ;;
+        *)
+            log_warning "Unknown architecture: $ARCH, proceeding with universal script"
+            ARCH="universal"
+            ;;
+    esac
+    
+    log_success "Detected system: $OS ($ARCH)"
+}
+
+# Check prerequisites
+check_prerequisites() {
+    log_info "Checking prerequisites..."
+    
+    # Check for required commands
+    local required_commands=("curl" "chmod" "mkdir")
+    local missing_commands=()
+    
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_commands+=("$cmd")
+        fi
+    done
+    
+    if [ ${#missing_commands[@]} -ne 0 ]; then
+        log_error "Missing required commands: ${missing_commands[*]}"
+        log_info "Please install the missing commands and try again"
+        exit 1
+    fi
+    
+    # Check kubectl (optional but recommended)
+    if command -v kubectl &> /dev/null; then
+        KUBECTL_VERSION=$(kubectl version --client --output=yaml 2>/dev/null | grep gitVersion | cut -d'"' -f4 || echo "unknown")
+        log_success "kubectl found - Version: $KUBECTL_VERSION"
+        log_success "KUBEFRED will work perfectly!"
+    else
+        log_warning "kubectl not found - KUBEFRED requires kubectl to function"
+        
+        # Ask user if they want to install kubectl
+        echo ""
+        echo -e "${CYAN}${ROBOT} KUBEFRED Butler: Sir, shall I install kubectl for you?${NC}"
+        echo -e "${YELLOW}  [Y] Yes, install kubectl automatically${NC}"
+        echo -e "${YELLOW}  [N] No, I'll install it myself later${NC}"
+        echo -e "${YELLOW}  [S] Skip and continue without kubectl${NC}"
+        echo ""
+        
+        while true; do
+            read -p "$(echo -e "${BLUE}Your choice [Y/N/S]: ${NC}")" choice
+            case $choice in
+                [Yy]* ) 
+                    log_install "Installing kubectl..."
+                    install_kubectl
+                    break
+                    ;;
+                [Nn]* ) 
+                    log_info "Skipping kubectl installation"
+                    log_warning "Remember to install kubectl manually: https://kubernetes.io/docs/tasks/tools/install-kubectl/"
+                    break
+                    ;;
+                [Ss]* ) 
+                    log_warning "Continuing without kubectl - KUBEFRED may not work properly"
+                    break
+                    ;;
+                * ) 
+                    echo -e "${RED}Please answer Y, N, or S${NC}"
+                    ;;
+            esac
+        done
+    fi
+    
+    log_success "All prerequisites satisfied"
+}
+
+# Create temporary directory
+setup_temp_dir() {
+    log_info "Setting up temporary directory..."
+    
+    if [ -d "$TEMP_DIR" ]; then
+        rm -rf "$TEMP_DIR"
+    fi
+    
+    mkdir -p "$TEMP_DIR"
+    log_success "Temporary directory created: $TEMP_DIR"
+}
+
+# Install kubectl
+install_kubectl() {
+    log_info "Installing kubectl for $OS ($ARCH)..."
+    
+    local kubectl_version="stable"
+    local kubectl_url=""
+    local kubectl_binary="kubectl"
+    
+    # Determine download URL based on OS and architecture
+    case "$OS" in
+        "linux")
+            case "$ARCH" in
+                "amd64")
+                    kubectl_url="https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                    ;;
+                "arm64")
+                    kubectl_url="https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl"
+                    ;;
+                "arm")
+                    kubectl_url="https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm/kubectl"
+                    ;;
+                *)
+                    log_error "Unsupported architecture for kubectl: $ARCH"
+                    return 1
+                    ;;
+            esac
+            ;;
+        "darwin")
+            case "$ARCH" in
+                "amd64")
+                    kubectl_url="https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/darwin/amd64/kubectl"
+                    ;;
+                "arm64")
+                    kubectl_url="https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/darwin/arm64/kubectl"
+                    ;;
+                *)
+                    log_error "Unsupported architecture for kubectl: $ARCH"
+                    return 1
+                    ;;
+            esac
+            ;;
+        *)
+            log_error "Unsupported OS for kubectl installation: $OS"
+            return 1
+            ;;
+    esac
+    
+    # Download kubectl
+    log_download "Downloading kubectl from official Kubernetes repository..."
+    cd "$TEMP_DIR"
+    
+    if curl -fsSL "$kubectl_url" -o "$kubectl_binary"; then
+        log_success "kubectl downloaded successfully"
+    else
+        log_error "Failed to download kubectl from $kubectl_url"
+        log_warning "You can install kubectl manually later"
+        return 1
+    fi
+    
+    # Verify download
+    if [ ! -f "$kubectl_binary" ] || [ ! -s "$kubectl_binary" ]; then
+        log_error "Downloaded kubectl is empty or corrupted"
+        return 1
+    fi
+    
+    # Make executable
+    chmod +x "$kubectl_binary"
+    
+    # Verify it's a valid binary (basic check)
+    if ! file "$kubectl_binary" | grep -q "executable"; then
+        log_error "Downloaded file is not a valid executable"
+        return 1
+    fi
+    
+    # Install kubectl
+    log_install "Installing kubectl to $INSTALL_DIR..."
+    cp "$kubectl_binary" "$INSTALL_DIR/kubectl"
+    
+    # Verify installation
+    if [ -x "$INSTALL_DIR/kubectl" ]; then
+        log_success "kubectl installed successfully to $INSTALL_DIR/kubectl"
+        
+        # Test kubectl
+        local kubectl_test_version
+        kubectl_test_version=$("$INSTALL_DIR/kubectl" version --client --output=yaml 2>/dev/null | grep gitVersion | cut -d'"' -f4 || echo "unknown")
+        log_success "kubectl version: $kubectl_test_version"
+        
+        # Create symlink if needed
+        if [ -d "/usr/bin" ] && [ "$INSTALL_DIR" != "/usr/bin" ]; then
+            if [ ! -f "/usr/bin/kubectl" ]; then
+                ln -s "$INSTALL_DIR/kubectl" "/usr/bin/kubectl" 2>/dev/null && \
+                    log_success "kubectl symlink created in /usr/bin" || \
+                    log_warning "Could not create kubectl symlink (this is optional)"
+            fi
+        fi
+        
+        return 0
+    else
+        log_error "kubectl installation failed"
+        return 1
+    fi
+}
+
+# Enhanced kubectl check after installation
+verify_kubectl_installation() {
+    if command -v kubectl &> /dev/null; then
+        log_info "Verifying kubectl installation..."
+        
+        # Test basic kubectl functionality
+        if kubectl version --client &> /dev/null; then
+            local kubectl_version
+            kubectl_version=$(kubectl version --client --output=yaml 2>/dev/null | grep gitVersion | cut -d'"' -f4 || echo "unknown")
+            log_success "kubectl is working correctly - Version: $kubectl_version"
+            
+            # Test cluster connectivity (optional)
+            log_info "Testing cluster connectivity (this may fail if no cluster is configured)..."
+            if kubectl cluster-info --request-timeout=3s &> /dev/null; then
+                log_success "kubectl can connect to a Kubernetes cluster!"
+            else
+                log_warning "No cluster configured yet - configure kubectl to connect to your cluster"
+                log_info "Tip: Use 'kubectl config set-context' or copy your kubeconfig file"
+            fi
+        else
+            log_warning "kubectl installed but not working properly"
+        fi
+    else
+        log_warning "kubectl not found in PATH after installation"
+    fi
+}
+download_kubefred() {
+    log_download "Downloading KUBEFRED from repository..."
+    
+    cd "$TEMP_DIR"
+    
+    # Download the script
+    if curl -fsSL "$KUBEFRED_URL" -o "$SCRIPT_NAME"; then
+        log_success "KUBEFRED downloaded successfully"
+    else
+        log_error "Failed to download KUBEFRED from $KUBEFRED_URL"
+        log_info "Please check your internet connection and try again"
+        cleanup
+        exit 1
+    fi
+    
+    # Verify download
+    if [ ! -f "$SCRIPT_NAME" ] || [ ! -s "$SCRIPT_NAME" ]; then
+        log_error "Downloaded file is empty or corrupted"
+        cleanup
+        exit 1
+    fi
+    
+    # Check if it's a valid bash script
+    if ! head -1 "$SCRIPT_NAME" | grep -q "^#!/bin/bash"; then
+        log_error "Downloaded file is not a valid bash script"
+        cleanup
+        exit 1
+    fi
+    
+    log_success "Download verification completed"
+}
+
+# Install KUBEFRED
+install_kubefred() {
+    log_install "Installing KUBEFRED to $INSTALL_DIR..."
+    
+    # Ensure install directory exists
+    mkdir -p "$INSTALL_DIR"
+    
+    # Copy script to install directory
+    cp "$TEMP_DIR/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
+    
+    # Make executable
+    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
+    
+    # Verify installation
+    if [ -x "$INSTALL_DIR/$SCRIPT_NAME" ]; then
+        log_success "KUBEFRED installed successfully to $INSTALL_DIR/$SCRIPT_NAME"
+    else
+        log_error "Installation failed - file not executable"
+        cleanup
+        exit 1
+    fi
+}
+
+# Test installation
+test_installation() {
+    log_info "Testing KUBEFRED installation..."
+    
+    if "$INSTALL_DIR/$SCRIPT_NAME" &> /dev/null; then
+        log_success "KUBEFRED is working correctly!"
+    else
+        # Try to get the usage output
+        if "$INSTALL_DIR/$SCRIPT_NAME" 2>&1 | grep -q "KUBEFRED"; then
+            log_success "KUBEFRED is working correctly!"
+        else
+            log_error "KUBEFRED test failed"
+            cleanup
+            exit 1
+        fi
+    fi
+}
+
+# Create symlink for easy access (optional)
+create_symlink() {
+    local symlink_dir="/usr/bin"
+    local symlink_path="$symlink_dir/$SCRIPT_NAME"
+    
+    if [ -d "$symlink_dir" ] && [ "$INSTALL_DIR" != "$symlink_dir" ]; then
+        log_info "Creating symlink for easier access..."
+        
+        # Remove existing symlink if present
+        if [ -L "$symlink_path" ]; then
+            rm "$symlink_path"
+        fi
+        
+        # Create symlink
+        ln -s "$INSTALL_DIR/$SCRIPT_NAME" "$symlink_path" 2>/dev/null || {
+            log_warning "Could not create symlink to $symlink_dir (this is optional)"
+            return 0
+        }
+        
+        log_success "Symlink created: $symlink_path"
+    fi
+}
+
+# Cleanup temporary files
+cleanup() {
+    if [ -d "$TEMP_DIR" ]; then
+        rm -rf "$TEMP_DIR"
+        log_info "Temporary files cleaned up"
+    fi
+}
+
+# Add to PATH check
+check_path() {
+    log_info "Checking PATH configuration..."
+    
+    if echo "$PATH" | grep -q "$INSTALL_DIR"; then
+        log_success "$INSTALL_DIR is already in PATH"
+    else
+        log_warning "$INSTALL_DIR is not in PATH"
+        log_info "You might need to add it to your shell profile:"
+        echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc"
+        echo "  source ~/.bashrc"
+    fi
+}
+
+# Show completion message
+show_completion() {
+    echo ""
+    echo -e "${GREEN}${CHECK}${CHECK}${CHECK} KUBEFRED Installation Complete! ${CHECK}${CHECK}${CHECK}${NC}"
+    echo ""
+    echo -e "${PURPLE}${ROBOT} KUBEFRED Butler is now ready to serve! ${ROBOT}${NC}"
+    echo ""
+    echo -e "${CYAN}Quick Start:${NC}"
+    echo "  KUBEFRED L                 # List all contexts"
+    echo "  KUBEFRED S                 # Show current status"
+    echo "  KUBEFRED C <cluster-name>  # Switch cluster"
+    echo "  KUBEFRED N <namespace>     # Switch namespace"
+    echo ""
+    echo -e "${CYAN}Examples:${NC}"
+    echo "  KUBEFRED C production      # Switch to production cluster"
+    echo "  KUBEFRED N default         # Switch to default namespace"
+    echo "  KUBEFRED L                 # See all available contexts"
+    echo ""
+    echo -e "${YELLOW}Need help? Run: KUBEFRED (without parameters)${NC}"
+    echo ""
+    
+    # Show version and location
+    echo -e "${CYAN}Installation Details:${NC}"
+    echo "  KUBEFRED Location: $INSTALL_DIR/$SCRIPT_NAME"
+    echo "  kubectl Location: $(command -v kubectl 2>/dev/null || echo 'Not installed')"
+    echo "  KUBEFRED Version: $KUBEFRED_VERSION"
+    echo "  OS: $OS ($ARCH)"
+    
+    # Show kubectl status
+    if command -v kubectl &> /dev/null; then
+        local kubectl_ver
+        kubectl_ver=$(kubectl version --client --output=yaml 2>/dev/null | grep gitVersion | cut -d'"' -f4 || echo "unknown")
+        echo "  kubectl Version: $kubectl_ver"
+    fi
+    echo ""
+    
+    echo ""
+    echo -e "${CYAN}Next Steps:${NC}"
+    if command -v kubectl &> /dev/null; then
+        echo "  1. Configure kubectl to connect to your cluster:"
+        echo "     - Copy your kubeconfig file to ~/.kube/config"
+        echo "     - Or use: kubectl config set-context <context-name>"
+        echo "  2. Test with: KUBEFRED L (to list contexts)"
+        echo "  3. Start using: KUBEFRED C <cluster-name>"
+    else
+        echo "  1. Install kubectl manually: https://kubernetes.io/docs/tasks/tools/"
+        echo "  2. Configure kubectl to connect to your cluster"
+        echo "  3. Then use KUBEFRED to manage contexts easily!"
+    fi
+    echo ""
+    
+    # Fun butler message
+    echo -e "${PURPLE}🎩 KUBEFRED Butler: Sir, I am at your service for all Kubernetes needs!${NC}"
+}
+
+# Error handler
+error_handler() {
+    local line_number=$1
+    log_error "Installation failed at line $line_number"
+    cleanup
+    exit 1
+}
+
+# Set error trap
+trap 'error_handler $LINENO' ERR
+
+# Main installation flow
+main() {
+    show_banner
+    
+    log_info "Starting KUBEFRED installation..."
+    echo ""
+    
+    check_root
+    detect_system
+    check_prerequisites
+    setup_temp_dir
+    download_kubefred
+    install_kubefred
+    verify_kubectl_installation
+    test_installation
+    create_symlink
+    check_path
+    cleanup
+    
+    show_completion
+}
+
+# Handle command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --version)
+            KUBEFRED_VERSION="$2"
+            shift 2
+            ;;
+        --install-dir)
+            INSTALL_DIR="$2"
+            shift 2
+            ;;
+        --url)
+            KUBEFRED_URL="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "KUBEFRED Installer"
+            echo ""
+            echo "Usage: $0 [options]"
+            echo ""
+            echo "Options:"
+            echo "  --version <version>    Install specific version (default: latest)"
+            echo "  --install-dir <dir>    Install directory (default: /usr/local/bin)"
+            echo "  --url <url>           Custom download URL"
+            echo "  --help, -h            Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  sudo $0                              # Install latest version"
+            echo "  sudo $0 --install-dir /usr/bin      # Install to /usr/bin"
+            echo "  curl -sSL install.kubefred.io | sudo bash"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Run main installation
+main
