@@ -1,0 +1,359 @@
+#!/bin/bash
+
+# KUBEFRED - Kubernetes Context and Namespace Switcher
+# Usage: 
+#   KUBEFRED C cluster-name    # Switch to cluster
+#   KUBEFRED N namespace-name  # Switch default namespace
+
+SCRIPT_NAME=$(basename "$0")
+
+# Function to display usage
+show_usage() {
+    echo ""
+    echo "██╗  ██╗██╗   ██╗██████╗ ███████╗███████╗██████╗ ███████╗██████╗ "
+    echo "██║ ██╔╝██║   ██║██╔══██╗██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗"
+    echo "█████╔╝ ██║   ██║██████╔╝█████╗  █████╗  ██████╔╝█████╗  ██║  ██║"
+    echo "██╔═██╗ ██║   ██║██╔══██╗██╔══╝  ██╔══╝  ██╔══██╗██╔══╝  ██║  ██║"
+    echo "██║  ██╗╚██████╔╝██████╔╝███████╗██║     ██║  ██║███████╗██████╔╝"
+    echo "╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═════╝ "
+    echo ""
+    echo "🤖 Your Kubernetes Context and Namespace Butler 🤖"
+    echo ""
+    echo "Usage:"
+    echo "  KUBEFRED C <cluster-name>     # Switch to specified cluster context"
+    echo "  KUBEFRED N <namespace-name>   # Switch default namespace for kubectl"
+    echo "  KUBEFRED L                    # List all available contexts"
+    echo "  KUBEFRED S                    # Show current context and namespace status"
+    echo ""
+    echo "Examples:"
+    echo "  KUBEFRED C production         # Switch to production cluster"
+    echo "  KUBEFRED C eks-prod1          # Switch to EKS cluster"
+    echo "  KUBEFRED N default            # Set default namespace"
+    echo "  KUBEFRED N kube-system        # Set kube-system namespace"
+    echo "  KUBEFRED L                    # List all contexts"
+    echo "  KUBEFRED S                    # Show current status"
+    echo ""
+    echo "💡 Tip: You can use partial cluster names (e.g., 'prod1' instead of full EKS ARN)"
+}
+
+# Function to find matching context
+find_matching_context() {
+    local search_term="$1"
+    local contexts
+    local exact_match=""
+    local partial_matches=()
+    
+    # Get all available contexts
+    contexts=$(kubectl config get-contexts --output=name 2>/dev/null)
+    
+    # First, try exact match
+    while IFS= read -r context; do
+        if [ "$context" = "$search_term" ]; then
+            echo "$context"
+            return 0
+        fi
+    done <<< "$contexts"
+    
+    # Try partial matches (case insensitive) and EKS cluster name extraction
+    while IFS= read -r context; do
+        # Check if search term is contained in context (case insensitive)
+        if echo "$context" | grep -qi "$search_term"; then
+            partial_matches+=("$context")
+        fi
+        
+        # Extract cluster name from EKS ARN and compare
+        if echo "$context" | grep -q "arn:aws:eks:"; then
+            cluster_extracted=$(echo "$context" | sed 's/.*cluster[/:]\([^/:]*\).*/\1/')
+            if [ "$cluster_extracted" = "$search_term" ] || echo "$cluster_extracted" | grep -qi "$search_term"; then
+                # Add to matches if not already there
+                local already_added=false
+                for existing in "${partial_matches[@]}"; do
+                    if [ "$existing" = "$context" ]; then
+                        already_added=true
+                        break
+                    fi
+                done
+                if [ "$already_added" = false ]; then
+                    partial_matches+=("$context")
+                fi
+            fi
+        fi
+    done <<< "$contexts"
+    
+    # Return results
+    if [ ${#partial_matches[@]} -eq 1 ]; then
+        echo "${partial_matches[0]}"
+        return 0
+    elif [ ${#partial_matches[@]} -gt 1 ]; then
+        echo "MULTIPLE_MATCHES"
+        printf '%s\n' "${partial_matches[@]}"
+        return 1
+    else
+        echo "NO_MATCH"
+        return 1
+    fi
+}
+
+# Function to switch cluster context
+switch_cluster() {
+    local cluster_name="$1"
+    
+    if [ -z "$cluster_name" ]; then
+        echo "❌ KUBEFRED: Cluster name is required"
+        show_usage
+        return 1
+    fi
+    
+    # Check if kubectl is available
+    if ! command -v kubectl &> /dev/null; then
+        echo "❌ KUBEFRED: kubectl is not installed or not in PATH"
+        return 1
+    fi
+    
+    # Find matching context
+    local match_result
+    match_result=$(find_matching_context "$cluster_name")
+    local find_status=$?
+    
+    if [ $find_status -eq 0 ] && [ "$match_result" != "NO_MATCH" ] && [ "$match_result" != "MULTIPLE_MATCHES" ]; then
+        # Single match found
+        local target_context="$match_result"
+        
+        # Switch context
+        if kubectl config use-context "$target_context" &> /dev/null; then
+            echo "🤖 KUBEFRED: Switched to cluster: $cluster_name"
+            if [ "$target_context" != "$cluster_name" ]; then
+                echo "🔍 KUBEFRED: Matched context: $target_context"
+            fi
+            
+            # Show current context info
+            current_context=$(kubectl config current-context)
+            current_namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
+            current_namespace=${current_namespace:-default}
+            
+            echo "📍 KUBEFRED: Current context: $current_context"
+            echo "📦 KUBEFRED: Current namespace: $current_namespace"
+        else
+            echo "❌ KUBEFRED: Failed to switch to cluster: $target_context"
+            return 1
+        fi
+    elif [ "$match_result" = "MULTIPLE_MATCHES" ]; then
+        # Multiple matches found - Interactive selection
+        echo "🎩 KUBEFRED Butler: Sir, I found multiple contexts matching '$cluster_name':"
+        echo ""
+        local i=1
+        local contexts_array=()
+        while IFS= read -r context; do
+            if [ "$context" != "MULTIPLE_MATCHES" ]; then
+                echo "  $i) $context"
+                contexts_array+=("$context")
+                ((i++))
+            fi
+        done <<< "$(find_matching_context "$cluster_name")"
+        echo ""
+        echo -n "🤖 KUBEFRED Butler: Sir, please enter the number of your preferred context: "
+        read -r selection
+        
+        # Validate selection
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#contexts_array[@]}" ]; then
+            local selected_context="${contexts_array[$((selection-1))]}"
+            echo "🎩 KUBEFRED Butler: Excellent choice, Sir! Switching to context $selection..."
+            
+            # Switch to selected context
+            if kubectl config use-context "$selected_context" &> /dev/null; then
+                echo "🤖 KUBEFRED: Successfully switched to cluster: $cluster_name"
+                echo "🔍 KUBEFRED: Selected context: $selected_context"
+                
+                # Show current context info
+                current_context=$(kubectl config current-context)
+                current_namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
+                current_namespace=${current_namespace:-default}
+                
+                echo "📍 KUBEFRED: Current context: $current_context"
+                echo "📦 KUBEFRED: Current namespace: $current_namespace"
+            else
+                echo "❌ KUBEFRED Butler: My apologies Sir, failed to switch to the selected context."
+                return 1
+            fi
+        else
+            echo "❌ KUBEFRED Butler: Sir, that's not a valid selection. Please run the command again and choose a number between 1 and ${#contexts_array[@]}."
+            return 1
+        fi
+    else
+        # No match found
+        echo "❌ KUBEFRED: No context found matching '$cluster_name'"
+        echo ""
+        echo "🤖 KUBEFRED: Available contexts:"
+        kubectl config get-contexts --output=name | while IFS= read -r context; do
+            # Try to extract cluster name for EKS contexts
+            if echo "$context" | grep -q "arn:aws:eks:"; then
+                cluster_short=$(echo "$context" | sed 's/.*cluster[/%]\([^/%]*\).*/\1/')
+                echo "  $context"
+                echo "    └─ Short name: $cluster_short"
+            else
+                echo "  $context"
+            fi
+        done
+        return 1
+    fi
+}
+
+# Function to list all contexts
+list_contexts() {
+    # Check if kubectl is available
+    if ! command -v kubectl &> /dev/null; then
+        echo "❌ KUBEFRED: kubectl is not installed or not in PATH"
+        return 1
+    fi
+    
+    echo "🤖 KUBEFRED Butler: Sir, here are all available contexts:"
+    echo ""
+    
+    local current_context=""
+    current_context=$(kubectl config current-context 2>/dev/null)
+    
+    kubectl config get-contexts --output=name | while IFS= read -r context; do
+        # Mark current context
+        if [ "$context" = "$current_context" ]; then
+            echo "  ➤ $context (current)"
+        else
+            echo "    $context"
+        fi
+        
+        # Show short name for EKS contexts
+        if echo "$context" | grep -q "arn:aws:eks:"; then
+            cluster_short=$(echo "$context" | sed 's/.*cluster[/:]\([^/:]*\).*/\1/')
+            echo "      └─ Short name: $cluster_short"
+        fi
+    done
+}
+
+# Function to show current status
+show_status() {
+    # Check if kubectl is available
+    if ! command -v kubectl &> /dev/null; then
+        echo "❌ KUBEFRED: kubectl is not installed or not in PATH"
+        return 1
+    fi
+    
+    echo "🤖 KUBEFRED Butler: Sir, here is your current Kubernetes status:"
+    echo ""
+    
+    # Get current context
+    current_context=$(kubectl config current-context 2>/dev/null)
+    if [ -n "$current_context" ]; then
+        echo "📍 Current Context: $current_context"
+        
+        # Show short name for EKS
+        if echo "$current_context" | grep -q "arn:aws:eks:"; then
+            cluster_short=$(echo "$current_context" | sed 's/.*cluster[/:]\([^/:]*\).*/\1/')
+            echo "   └─ Short name: $cluster_short"
+        fi
+    else
+        echo "❌ No current context set"
+        return 1
+    fi
+    
+    # Get current namespace
+    current_namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
+    current_namespace=${current_namespace:-default}
+    echo "📦 Current Namespace: $current_namespace"
+    
+    # Try to get cluster info
+    echo ""
+    echo "🔍 Cluster Information:"
+    if kubectl cluster-info --request-timeout=5s &> /dev/null; then
+        echo "   ✅ Cluster is reachable"
+        
+        # Get node count
+        node_count=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+        if [ "$node_count" -gt 0 ]; then
+            echo "   🖥️  Nodes: $node_count"
+        fi
+        
+        # Get namespace count
+        ns_count=$(kubectl get namespaces --no-headers 2>/dev/null | wc -l)
+        if [ "$ns_count" -gt 0 ]; then
+            echo "   📁 Namespaces: $ns_count"
+        fi
+    else
+        echo "   ❌ Cluster is not reachable or authentication failed"
+    fi
+}
+switch_namespace() {
+    local namespace_name="$1"
+    
+    if [ -z "$namespace_name" ]; then
+        echo "❌ KUBEFRED: Namespace name is required"
+        show_usage
+        return 1
+    fi
+    
+    # Check if kubectl is available
+    if ! command -v kubectl &> /dev/null; then
+        echo "❌ KUBEFRED: kubectl is not installed or not in PATH"
+        return 1
+    fi
+    
+    # Check if we have a current context
+    if ! kubectl config current-context &> /dev/null; then
+        echo "❌ KUBEFRED: No current kubectl context set. Please set a context first using 'KUBEFRED C <cluster-name>'."
+        return 1
+    fi
+    
+    # Check if namespace exists
+    if ! kubectl get namespace "$namespace_name" &> /dev/null; then
+        echo "❌ KUBEFRED: Namespace '${namespace_name}' not found in current cluster"
+        echo ""
+        echo "🤖 KUBEFRED: Available namespaces:"
+        kubectl get namespaces --output=custom-columns=NAME:.metadata.name --no-headers 2>/dev/null || echo "Failed to list namespaces"
+        return 1
+    fi
+    
+    # Set namespace as default for current context
+    current_context=$(kubectl config current-context)
+    if kubectl config set-context "$current_context" --namespace="$namespace_name" &> /dev/null; then
+        echo "🤖 KUBEFRED: Default namespace set to: $namespace_name"
+        echo "📍 KUBEFRED: Context: $current_context"
+        echo "📦 KUBEFRED: Default namespace: $namespace_name"
+    else
+        echo "❌ KUBEFRED: Failed to set default namespace to: $namespace_name"
+        return 1
+    fi
+}
+
+# Main logic
+if [ "$#" -eq 0 ]; then
+    show_usage
+    exit 1
+fi
+
+case "$1" in
+    "C"|"c")
+        if [ -z "$2" ]; then
+            echo "❌ KUBEFRED: Cluster name is required after 'C'"
+            show_usage
+            exit 1
+        fi
+        switch_cluster "$2"
+        ;;
+    "N"|"n")
+        if [ -z "$2" ]; then
+            echo "❌ KUBEFRED: Namespace name is required after 'N'"
+            show_usage
+            exit 1
+        fi
+        switch_namespace "$2"
+        ;;
+    "L"|"l")
+        list_contexts
+        ;;
+    "S"|"s")
+        show_status
+        ;;
+    *)
+        echo "❌ KUBEFRED: Invalid command '$1'. Use 'C' for cluster, 'N' for namespace, 'L' to list contexts, or 'S' for status."
+        show_usage
+        exit 1
+        ;;
+esac
